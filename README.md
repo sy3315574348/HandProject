@@ -1,5 +1,8 @@
 # 手势特效切换器
 
+操作看不懂的,实操我发在抖音了
+https://v.douyin.com/ZRGM4rz-kgM/
+
 基于 **MediaPipe Hands** 的手势识别 Web 应用，通过摄像头实时捕捉手部动作，驱动四种不同的视觉特效模式。
 
 ## 技术栈
