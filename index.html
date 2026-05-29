@@ -1,0 +1,1279 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>手势特效切换器</title>
+
+    <script src="lib/camera_utils.js"></script>
+    <script src="lib/hands.js"></script>
+
+    <style>
+        body{
+            margin:0;
+            overflow:hidden;
+            background:#000;
+            display:flex;
+            justify-content:center;
+            align-items:center;
+            height:100vh;
+        }
+
+        .input_video{
+            display:none;
+        }
+    </style>
+</head>
+<body>
+
+<video class="input_video" autoplay playsinline></video>
+<canvas class="output_canvas" width="1280" height="720"></canvas>
+
+<script>
+const videoElement = document.querySelector('.input_video');
+const canvasElement = document.querySelector('.output_canvas');
+const canvasCtx = canvasElement.getContext('2d');
+
+
+// ─────────────────────────────────────────────
+// 手势工具
+// ─────────────────────────────────────────────
+function fingersUp(hand) {
+    let n = 0;
+    [[8,6],[12,10],[16,14],[20,18]].forEach(([t,p]) => {
+        if (hand[t].y < hand[p].y) n++;
+    });
+    return n;
+}
+
+function palmPos(hand, W, H) {
+    const js = [0,5,9,13,17];
+    const s = js.reduce((a,i) => ({
+        x: a.x + hand[i].x,
+        y: a.y + hand[i].y
+    }), {x:0,y:0});
+
+    return {
+        x: s.x / js.length * W,
+        y: s.y / js.length * H
+    };
+}
+
+function isIndexOnly(hand) {
+    return hand[8].y < hand[6].y &&
+           hand[12].y > hand[10].y &&
+           hand[16].y > hand[14].y &&
+           hand[20].y > hand[18].y;
+}
+
+function isThumbIndexPinch(hand, W, H) {
+    const tx = hand[4].x * W, ty = hand[4].y * H;
+    const ix = hand[8].x * W, iy = hand[8].y * H;
+    return Math.hypot(tx - ix, ty - iy) < 40;
+}
+
+function isThreeOpen(hand) {
+    const thumbOut = Math.hypot(hand[4].x - hand[2].x, hand[4].y - hand[2].y) > 0.06;
+    const indexUp = hand[8].y < hand[6].y;
+    const pinkyUp = hand[20].y < hand[18].y;
+    const middleDown = hand[12].y > hand[10].y;
+    const ringDown = hand[16].y > hand[14].y;
+    return thumbOut && indexUp && pinkyUp && middleDown && ringDown;
+}
+
+
+// ─────────────────────────────────────────────
+// BaseMode
+// ─────────────────────────────────────────────
+class BaseMode {
+    constructor(canvas, ctx) {
+        this.canvas = canvas;
+        this.ctx = ctx;
+    }
+
+    init() {}
+
+    update(landmarks, video) {
+        throw new Error("必须实现 update()");
+    }
+
+    destroy() {
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+}
+
+
+// ─────────────────────────────────────────────
+// Mode 1: 粒子特效
+// ─────────────────────────────────────────────
+class ParticleMode extends BaseMode {
+    constructor(canvas, ctx) {
+        super(canvas, ctx);
+        this.particles = [];
+        this.fireworkCooldown = 0;
+        this.bigPhase = 'idle';
+        this.bigTimer = 0;
+        this.bigCooldown = 0;
+    }
+
+    init() {
+        this.particles = Array.from({ length: 80 }, () => ({
+            x: Math.random() * this.canvas.width,
+            y: Math.random() * this.canvas.height,
+            vx: (Math.random() - 0.5) * 1.5,
+            vy: (Math.random() - 0.5) * 1.5,
+            size: Math.random() * 3 + 1,
+            hue: Math.random() * 360,
+            alpha: Math.random() * 0.5 + 0.3,
+            isFirework: false,
+            isBig: false,
+            life: 1
+        }));
+        this.fireworkCooldown = 0;
+        this.bigPhase = 'idle'; this.bigTimer = 0; this.bigCooldown = 0;
+    }
+
+    _heartBurst(cx, cy) {
+        if (this.fireworkCooldown > 0) return;
+        this.fireworkCooldown = 40;
+
+        const baseHue = Math.random() * 60 + 330;
+
+        for (let i = 0; i < 80; i++) {
+            const t = (i / 80) * Math.PI * 2;
+            const hx = 16 * Math.pow(Math.sin(t), 3);
+            const hy = -(13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t));
+
+            this.particles.push({
+                x: cx,
+                y: cy,
+                vx: hx * 1.5 + (Math.random() - 0.5) * 4,
+                vy: hy * 1.5 + (Math.random() - 0.5) * 4,
+                size: Math.random() * 5 + 2,
+                hue: baseHue + (Math.random() - 0.5) * 30,
+                isFirework: true,
+                isBig: false,
+                life: 1.0
+            });
+        }
+    }
+
+    _startBigHeart(W, H) {
+        if (this.bigCooldown > 0) return;
+        this.bigCooldown = 200;
+
+        const cx = W / 2, cy = H / 2;
+        const targetCount = 300;
+        const scale = 16; // 爱心大小
+
+        // 确保有足够的粒子
+        const existing = this.particles.filter(p => !p.isFirework || p.life < 0.1);
+        while (this.particles.length < targetCount) {
+            this.particles.push({
+                x: Math.random() * W,
+                y: Math.random() * H,
+                vx: 0, vy: 0,
+                size: Math.random() * 3 + 1.5,
+                hue: Math.random() * 60 + 330,
+                alpha: 0.7,
+                isFirework: false,
+                isBig: false,
+                life: 1
+            });
+        }
+
+        // 给每个粒子分配爱心曲线上的目标位置
+        const hueBase = Math.random() * 60 + 320;
+        this.particles.forEach((p, i) => {
+            p.isBig = true;
+            p.isFirework = false;
+            p.targetX = null; p.targetY = null;
+        });
+
+        // 取前 targetCount 个粒子分配目标
+        const pool = this.particles.filter(p => p.isBig);
+        for (let i = 0; i < Math.min(pool.length, targetCount); i++) {
+            const t = (i / targetCount) * Math.PI * 2;
+            const hx = 16 * Math.pow(Math.sin(t), 3);
+            const hy = -(13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t));
+            pool[i].targetX = cx + hx * scale;
+            pool[i].targetY = cy + hy * scale;
+            pool[i].hue = hueBase + (Math.random() - 0.5) * 40;
+            pool[i].size = Math.random() * 4 + 2;
+        }
+
+        this.bigPhase = 'converging';
+        this.bigTimer = 30; // ~0.5s 汇聚
+    }
+
+    update(multiHandLandmarks, videoElement) {
+        const ctx = this.ctx;
+        const W = this.canvas.width, H = this.canvas.height;
+
+        if (this.fireworkCooldown > 0) this.fireworkCooldown--;
+
+        // 背景只保留非常轻的拖影，不压暗画面
+        ctx.drawImage(videoElement, 0, 0, W, H);
+        ctx.fillStyle = 'rgba(0,0,0,0.01)';
+        ctx.fillRect(0, 0, W, H);
+
+        if (this.bigCooldown > 0) this.bigCooldown--;
+
+        if (multiHandLandmarks) {
+            // 双手四指 → 大爱心；单手四指 → 小烟花
+            const fullHands = multiHandLandmarks.filter(h => fingersUp(h) >= 4);
+            if (fullHands.length >= 2 && this.bigPhase === 'idle') {
+                this._startBigHeart(W, H);
+            } else if (this.bigPhase === 'idle') {
+                fullHands.forEach(hand => {
+                    const pos = palmPos(hand, W, H);
+                    this._heartBurst(pos.x, pos.y);
+                });
+            }
+        }
+
+        // ── 大爱心动画阶段 ──────────────────────
+        if (this.bigPhase !== 'idle') {
+            this.bigTimer--;
+            const cx = W / 2, cy = H / 2;
+
+            if (this.bigPhase === 'converging') {
+                for (const p of this.particles) {
+                    if (p.targetX == null) continue;
+                    const dx = p.targetX - p.x, dy = p.targetY - p.y;
+                    p.x += dx * 0.18;
+                    p.y += dy * 0.18;
+                    p.vx = dx * 0.1; p.vy = dy * 0.1;
+                }
+                if (this.bigTimer <= 0) { this.bigPhase = 'holding'; this.bigTimer = 40; }
+            } else if (this.bigPhase === 'holding') {
+                // 粒子在爱心位置微微浮动
+                for (const p of this.particles) {
+                    if (p.targetX == null) continue;
+                    p.x = p.targetX + Math.sin(Date.now()*0.003 + p.x*0.1) * 2;
+                    p.y = p.targetY + Math.cos(Date.now()*0.004 + p.y*0.1) * 2;
+                    p.vx = 0; p.vy = 0;
+                }
+                if (this.bigTimer <= 0) {
+                    // 爆炸！
+                    for (const p of this.particles) {
+                        if (p.targetX == null) continue;
+                        const dx = p.x - cx, dy = p.y - cy;
+                        const dist = Math.hypot(dx, dy) || 1;
+                        const speed = 3 + Math.random() * 8;
+                        p.vx = (dx / dist) * speed + (Math.random() - 0.5) * 6;
+                        p.vy = (dy / dist) * speed + (Math.random() - 0.5) * 6;
+                        p.isFirework = true;
+                        p.isBig = false;
+                        p.targetX = null; p.targetY = null;
+                        p.life = 1.0;
+                        p.alpha = 1;
+                    }
+                    this.bigPhase = 'idle';
+                }
+            }
+        }
+
+        for (let i = this.particles.length - 1; i >= 0; i--) {
+            const p = this.particles[i];
+
+            if (p.isFirework) {
+                p.vy += 0.3;
+                p.vx *= 0.97;
+                p.vy *= 0.97;
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.016;
+
+                if (p.life <= 0) {
+                    this.particles.splice(i, 1);
+                    continue;
+                }
+
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+                ctx.fillStyle = `hsla(${p.hue},100%,65%,${p.life})`;
+                ctx.fill();
+            } else if (p.isBig && this.bigPhase !== 'idle') {
+                // 大爱心粒子：位置已由动画控制，只管绘制
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = `hsla(${p.hue},100%,70%,0.9)`;
+                ctx.fill();
+            } else {
+                p.vx *= 0.99;
+                p.vy *= 0.99;
+                p.x += p.vx;
+                p.y += p.vy;
+
+                if (p.x < 0) p.x = W;
+                if (p.x > W) p.x = 0;
+                if (p.y < 0) p.y = H;
+                if (p.y > H) p.y = 0;
+
+                p.hue = (p.hue + 0.5) % 360;
+
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = `hsla(${p.hue},80%,70%,${p.alpha})`;
+                ctx.fill();
+            }
+        }
+    }
+
+    destroy() {
+        this.particles = [];
+        this.bigPhase = 'idle'; this.bigTimer = 0; this.bigCooldown = 0;
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+}
+
+
+// ─────────────────────────────────────────────
+// Mode 2: 取景器
+// ─────────────────────────────────────────────
+class ViewfinderMode extends BaseMode {
+    constructor(canvas, ctx) {
+        super(canvas, ctx);
+        this.motionValue = 0;
+    }
+
+    init() {}
+
+    update(multiHandLandmarks, videoElement) {
+        const ctx = this.ctx;
+        const W = this.canvas.width, H = this.canvas.height;
+
+        ctx.save();
+        ctx.filter = 'grayscale(100%)';
+        ctx.drawImage(videoElement, 0, 0, W, H);
+        ctx.restore();
+
+        if (multiHandLandmarks && multiHandLandmarks.length >= 2) {
+            const h1 = multiHandLandmarks[0], h2 = multiHandLandmarks[1];
+            const pts = [
+                { x: h1[4].x * W, y: h1[4].y * H },
+                { x: h1[8].x * W, y: h1[8].y * H },
+                { x: h2[4].x * W, y: h2[4].y * H },
+                { x: h2[8].x * W, y: h2[8].y * H },
+            ];
+
+            const minX = Math.min(...pts.map(p => p.x));
+            const maxX = Math.max(...pts.map(p => p.x));
+            const minY = Math.min(...pts.map(p => p.y));
+            const maxY = Math.max(...pts.map(p => p.y));
+
+            const rW = maxX - minX;
+            const rH = maxY - minY;
+            if (rW < 10 || rH < 10) return;
+
+            this.motionValue = Math.min(Math.hypot(rW, rH) / Math.hypot(W, H), 1);
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(minX, minY, rW, rH);
+            ctx.clip();
+            ctx.filter = 'none';
+            ctx.drawImage(videoElement, 0, 0, W, H);
+
+            ctx.lineWidth = 2 + this.motionValue * 6;
+            ctx.strokeStyle = `rgba(0,255,150,${0.5 + this.motionValue * 0.5})`;
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+}
+
+
+// ─────────────────────────────────────────────
+// Mode 3: 3D 粒子牵引
+// 规则：
+// 1. 不会随机自动生成粒子
+// 2. 只能靠你五指张开来生成
+// 3. 只有识别到食指伸出时才会被牵引
+// 4. 粒子带加速度和惯性，甩动手会更有“飞出去”的感觉
+// ─────────────────────────────────────────────
+class TetherMode extends BaseMode {
+    constructor(canvas, ctx) {
+        super(canvas, ctx);
+        this.particles = [];
+        this.focal = 500;
+        this.MAX_PARTICLES = 300;
+        this.spawnCooldown = {};
+        this.prevPalmPos = {};
+        this.explosionCooldown = 0;
+    }
+
+    init() {
+        this.particles = [];
+        this.spawnCooldown = {};
+        this.prevPalmPos = {};
+        this.explosionCooldown = 0;
+    }
+
+    isIndexOnly(hand) {
+        const index = hand[8].y < hand[6].y;
+        const middle = hand[12].y < hand[10].y;
+        const ring = hand[16].y < hand[14].y;
+        const pinky = hand[20].y < hand[18].y;
+        return index && !middle && !ring && !pinky;
+    }
+
+    _proj(x, y, z) {
+        const s = this.focal / (z + this.focal);
+        return {
+            sx: x * s + this.canvas.width / 2,
+            sy: y * s + this.canvas.height / 2,
+            s
+        };
+    }
+
+    _spawnAt(wx, wy, count = 30, impulse = { x: 0, y: 0, z: 0 }) {
+        const over = this.particles.length + count - this.MAX_PARTICLES;
+        if (over > 0) this.particles.splice(0, over);
+
+        for (let i = 0; i < count; i++) {
+            this.particles.push({
+                x: wx + (Math.random() - 0.5) * 40,
+                y: wy + (Math.random() - 0.5) * 40,
+                z: (Math.random() - 0.5) * 120,
+
+                vx: impulse.x + (Math.random() - 0.5) * 2.0,
+                vy: impulse.y + (Math.random() - 0.5) * 2.0,
+                vz: impulse.z + (Math.random() - 0.5) * 0.8,
+
+                ax: 0,
+                ay: 0,
+                az: 0,
+
+                size: Math.random() * 4 + 1,
+                hue: Math.random() * 360
+            });
+        }
+    }
+
+    update(multiHandLandmarks, videoElement) {
+        const ctx = this.ctx;
+        const W = this.canvas.width, H = this.canvas.height;
+
+        // 背景压暗层非常弱，避免画面发黑
+        ctx.drawImage(videoElement, 0, 0, W, H);
+        ctx.fillStyle = 'rgba(0,0,20,0.01)';
+        ctx.fillRect(0, 0, W, H);
+
+        const indexTips = [];
+
+        if (multiHandLandmarks) {
+            multiHandLandmarks.forEach((hand, hi) => {
+                const palm = palmPos(hand, W, H);
+
+                // 只认食指尖，不再用手掌中心
+                if (this.isIndexOnly(hand)) {
+                    indexTips.push({
+                        x: hand[8].x * W - W / 2,
+                        y: hand[8].y * H - H / 2,
+                        screenX: hand[8].x * W,
+                        screenY: hand[8].y * H
+                    });
+                }
+
+                // 只能五指张开时生成粒子
+                if (fingersUp(hand) >= 4) {
+                    const now = Date.now();
+                    if (!this.spawnCooldown[hi] || now - this.spawnCooldown[hi] > 500) {
+                        this.spawnCooldown[hi] = now;
+
+                        const wx = palm.x - W / 2;
+                        const wy = palm.y - H / 2;
+
+                        const prev = this.prevPalmPos[hi];
+                        let impulse = { x: 0, y: 0, z: 0 };
+
+                        if (prev) {
+                            impulse = {
+                                x: (wx - prev.x) * 0.12,
+                                y: (wy - prev.y) * 0.12,
+                                z: 0
+                            };
+                        }
+
+                        this._spawnAt(wx, wy, 30, impulse);
+                    }
+                }
+
+                this.prevPalmPos[hi] = {
+                    x: palm.x - W / 2,
+                    y: palm.y - H / 2
+                };
+            });
+        }
+
+        this.particles.sort((a, b) => b.z - a.z);
+
+        if (this.explosionCooldown > 0) this.explosionCooldown--;
+
+        // ── 双手食指交叉 + 粒子聚集 → 爆破 ──────
+        if (indexTips.length >= 2 && this.particles.length > 15 && this.explosionCooldown <= 0) {
+            const dist = Math.hypot(indexTips[0].screenX - indexTips[1].screenX, indexTips[0].screenY - indexTips[1].screenY);
+            if (dist < 35) {
+                const cx = (indexTips[0].x + indexTips[1].x) / 2 + W / 2;
+                const cy = (indexTips[0].y + indexTips[1].y) / 2 + H / 2;
+                let gathered = 0;
+                for (const p of this.particles) {
+                    if (Math.hypot(p.x - (cx - W/2), p.y - (cy - H/2)) < 250) gathered++;
+                }
+                if (gathered / this.particles.length > 0.55) {
+                    this.explosionCooldown = 80;
+                    for (const p of this.particles) {
+                        const dx = p.x - (cx - W/2);
+                        const dy = p.y - (cy - H/2);
+                        const dd = Math.hypot(dx, dy) || 1;
+                        const speed = 6 + Math.random() * 18;
+                        p.vx = (dx / dd) * speed + (Math.random() - 0.5) * 10;
+                        p.vy = (dy / dd) * speed + (Math.random() - 0.5) * 10;
+                        p.vz = (Math.random() - 0.5) * 14;
+                    }
+                }
+            }
+        }
+
+        const canAttract = indexTips.length > 0;
+
+        this.particles.forEach(p => {
+            p.ax = 0;
+            p.ay = 0;
+            p.az = 0;
+
+            if (canAttract) {
+                indexTips.forEach(tip => {
+                    const dx = tip.x - p.x;
+                    const dy = tip.y - p.y;
+                    const dz = -p.z;
+
+                    const dist = Math.hypot(dx, dy, dz);
+
+                    if (dist < 320 && dist > 0) {
+                        const force = ((320 - dist) / 320) * 0.95;
+
+                        p.ax += (dx / dist) * force;
+                        p.ay += (dy / dist) * force;
+                        p.az += (dz / dist) * force;
+                    }
+                });
+
+                p.ax += Math.sin((p.y + p.z) * 0.01) * 0.015;
+                p.ay += Math.cos((p.x + p.z) * 0.01) * 0.015;
+            }
+
+            p.vx += p.ax;
+            p.vy += p.ay;
+            p.vz += p.az;
+
+            p.vx *= 0.94;
+            p.vy *= 0.94;
+            p.vz *= 0.94;
+
+            p.x += p.vx;
+            p.y += p.vy;
+            p.z += p.vz;
+
+            const limitX = W * 0.75;
+            const limitY = H * 0.75;
+            const limitZ = 260;
+
+            if (p.x < -limitX || p.x > limitX) {
+                p.vx *= -0.85;
+                p.x = Math.max(Math.min(p.x, limitX), -limitX);
+            }
+
+            if (p.y < -limitY || p.y > limitY) {
+                p.vy *= -0.85;
+                p.y = Math.max(Math.min(p.y, limitY), -limitY);
+            }
+
+            if (p.z < -limitZ || p.z > limitZ) {
+                p.vz *= -0.85;
+                p.z = Math.max(Math.min(p.z, limitZ), -limitZ);
+            }
+
+            p.hue = (p.hue + 1) % 360;
+
+            const { sx, sy, s } = this._proj(p.x, p.y, p.z);
+            const speed = Math.hypot(p.vx, p.vy, p.vz);
+            const brightness = Math.min(55 + speed * 10, 95);
+            const alpha = Math.min(s * 1.5, 1);
+
+            ctx.beginPath();
+            ctx.arc(sx, sy, Math.max(p.size * s, 0.5), 0, Math.PI * 2);
+            ctx.fillStyle = `hsla(${p.hue},100%,${brightness}%,${alpha})`;
+            ctx.fill();
+        });
+
+        // 食指光点和牵引线：定位到手指尖
+        indexTips.forEach(tip => {
+            const { sx: hsx, sy: hsy } = this._proj(tip.x, tip.y, 0);
+
+            ctx.save();
+            ctx.shadowColor = 'rgba(150,220,255,0.95)';
+            ctx.shadowBlur = 30;
+            ctx.beginPath();
+            ctx.arc(hsx, hsy, 10, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(220,245,255,1)';
+            ctx.fill();
+            ctx.restore();
+
+            this.particles.forEach(p => {
+                const dist2D = Math.hypot(tip.x - p.x, tip.y - p.y);
+                if (dist2D < 250) {
+                    const { sx, sy } = this._proj(p.x, p.y, p.z);
+                    const a = (1 - dist2D / 250) * 0.7;
+
+                    ctx.beginPath();
+                    ctx.moveTo(hsx, hsy);
+                    ctx.lineTo(sx, sy);
+                    ctx.strokeStyle = `rgba(150,220,255,${a})`;
+                    ctx.lineWidth = a * 2;
+                    ctx.stroke();
+                }
+            });
+        });
+    }
+
+    destroy() {
+        this.particles = [];
+        this.prevPalmPos = {};
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+}
+
+
+// ─────────────────────────────────────────────
+// Mode 4: 隔空手写
+// ─────────────────────────────────────────────
+class DrawingMode extends BaseMode {
+    constructor(canvas, ctx) {
+        super(canvas, ctx);
+        this.strokes = [];
+        this.currentStroke = null;
+        this.tool = 'pen';
+        this.penColor = '#FF4444';
+        this.penSize = 8;
+        this.PEN_COLORS = ['#FF4444','#4488FF','#44DD44','#FFDD44','#FFFFFF','#000000'];
+        this.isScaling = false;
+        this.scaleStartDist = 0;
+        this.particles = [];
+        // 右侧工具栏
+        this.tbExpanded = true;
+        this.tbHovered = -1;
+        this.tbHoverTime = 0;
+        this.tbCooldown = 0;
+        this.TB_X = 12;
+        this.TB_START = 108;
+        this.TB_CX = 38;  // 图标圆心 cx
+        this.TB_SPACE = 56;
+        // 移动笔画
+        this.moveStroke = null;
+        this.moveFinger = null;
+        this.moveHoverStart = 0;
+        this.writeLockUntil = 0;
+    }
+
+    init() {
+        this.strokes = [];
+        this.currentStroke = null;
+        this.tool = 'pen'; this.penColor = '#FF4444'; this.penSize = 8;
+        this.isScaling = false; this.particles = [];
+        this.tbExpanded = true; this.tbHovered = -1; this.tbHoverTime = 0; this.tbCooldown = 0;
+        this.moveStroke = null; this.moveFinger = null; this.moveHoverStart = 0; this.writeLockUntil = 0;
+    }
+
+    destroy() {
+        this.strokes = []; this.currentStroke = null; this.particles = [];
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+
+    // ── 镜像文字（切换到视觉坐标绘制）─────────
+    _tbText(ctx, text, vx, vy, color, font, align) {
+        ctx.save();
+        ctx.setTransform(1,0,0,1,0,0);
+        ctx.fillStyle = color; ctx.font = font;
+        ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(text, vx, vy);
+        ctx.restore();
+    }
+
+    // ── 工具栏项定义 ──────────────────────────
+    _getTBItems() {
+        const CX = this.TB_CX, W = this.canvas.width;
+        let y = this.TB_START, S = this.TB_SPACE;
+        const items = [];
+        if (this.tbExpanded) {
+            // 收起按钮
+            items.push({ id:'collapse', cx:CX, cy:y, r:20, hitR:32 });
+            y += S;
+            // 笔
+            items.push({ id:'pen', cx:CX, cy:y, r:20, hitR:30, active:this.tool==='pen', label:'笔' });
+            y += S;
+            // 橡皮
+            items.push({ id:'eraser', cx:CX, cy:y, r:20, hitR:30, active:this.tool==='eraser', label:'擦' });
+            y += S + 6;
+            // 颜色 2列×3行
+            const cy0 = y;
+            for (let i = 0; i < 6; i++) {
+                const col = i % 2, row = Math.floor(i / 2);
+                items.push({
+                    id:'color_'+i, cx:CX + (col*30 - 15), cy:cy0 + row*32, r:12, hitR:18,
+                    color:this.PEN_COLORS[i], selected:this.penColor===this.PEN_COLORS[i]
+                });
+            }
+            y += 3*32 + 10;
+            // 大小滑块
+            items.push({ id:'size', cx:CX, cy:y, h:90, w:6 });
+        } else {
+            // 展开箭头
+            items.push({ id:'expand', cx:CX, cy:y, r:22, hitR:36 });
+        }
+        return items;
+    }
+
+    // ── 绘制工具栏 ────────────────────────────
+    _drawToolbar(ctx) {
+        const items = this._getTBItems();
+        const W = this.canvas.width;
+        ctx.save();
+
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            const vx = W - it.cx;
+            const hovering = this.tbHovered === i;
+            const glow = hovering ? 'rgba(255,215,0,0.6)' : 'rgba(255,255,255,0.2)';
+
+            if (it.id === 'collapse' || it.id === 'expand') {
+                // 伸缩箭头
+                ctx.beginPath(); ctx.arc(it.cx, it.cy, it.r, 0, Math.PI*2);
+                ctx.fillStyle = hovering ? 'rgba(255,215,0,0.25)' : 'rgba(255,255,255,0.07)';
+                ctx.fill();
+                ctx.strokeStyle = glow; ctx.lineWidth = hovering ? 2.5 : 1.5; ctx.stroke();
+                // 箭头符号
+                const arrow = it.id === 'collapse' ? '◀' : '▶';
+                this._tbText(ctx, arrow, vx, it.cy + 1, hovering ? '#FFD700' : 'rgba(255,255,255,0.5)', '18px Arial', 'center');
+            } else if (it.id === 'pen' || it.id === 'eraser') {
+                // 工具按钮
+                ctx.beginPath(); ctx.arc(it.cx, it.cy, it.r, 0, Math.PI*2);
+                ctx.fillStyle = it.active ? 'rgba(255,215,0,0.3)' : 'rgba(255,255,255,0.06)';
+                ctx.fill();
+                ctx.strokeStyle = it.active ? 'rgba(255,215,0,0.7)' : (hovering ? '#FFD700' : 'rgba(255,255,255,0.15)');
+                ctx.lineWidth = hovering ? 2.5 : (it.active ? 2 : 1.5); ctx.stroke();
+                // 图标
+                const icon = it.id === 'pen' ? '✎' : '⌫';
+                this._tbText(ctx, icon, vx, it.cy, hovering ? '#FFD700' : 'rgba(255,255,255,0.55)', '18px Arial', 'center');
+                // 标签
+                this._tbText(ctx, it.label, vx, it.cy + 28, it.active ? 'rgba(255,215,0,0.8)' : 'rgba(255,255,255,0.35)', '12px Arial', 'center');
+            } else if (it.id.startsWith('color_')) {
+                // 颜色圆
+                ctx.beginPath(); ctx.arc(it.cx, it.cy, it.r, 0, Math.PI*2);
+                ctx.fillStyle = it.color; ctx.fill();
+                ctx.strokeStyle = it.selected ? '#FFD700' : (hovering ? '#FFD700' : 'rgba(255,255,255,0.3)');
+                ctx.lineWidth = it.selected ? 3 : (hovering ? 2.5 : 1.5); ctx.stroke();
+            } else if (it.id === 'size') {
+                // 大小滑块（垂直条）
+                const sy = it.cy, sh = it.h;
+                ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 3;
+                ctx.beginPath(); ctx.moveTo(it.cx, sy); ctx.lineTo(it.cx, sy+sh); ctx.stroke();
+                // 滑块
+                const ratio = (this.penSize - 2) / 28;
+                const dy = sy + ratio * sh;
+                ctx.fillStyle = hovering ? '#FFD700' : 'rgba(255,215,0,0.7)';
+                ctx.beginPath(); ctx.arc(it.cx, dy, 11, 0, Math.PI*2); ctx.fill();
+                // 文字
+                this._tbText(ctx, '大小:'+this.penSize, vx, sy+sh+16, 'rgba(255,255,255,0.35)', '11px Arial', 'center');
+            }
+        }
+        ctx.restore();
+    }
+
+    // ── 工具栏悬停检测 ────────────────────────
+    _checkTBHover(fx, fy) {
+        const items = this._getTBItems();
+        if (this.tbCooldown > 0) { this.tbCooldown--; return; }
+
+        let found = -1;
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            let hr = it.hitR || it.r + 12;
+            // 颜色区域扩大覆盖两列
+            if (it.id.startsWith('color_')) hr = 28;
+            // 大小条
+            if (it.id === 'size') {
+                if (Math.abs(fx - it.cx) < 30 && fy >= it.cy - 8 && fy <= it.cy + it.h + 8) {
+                    found = i;
+                    // 实时调整大小
+                    const ratio = Math.max(0, Math.min(1, (fy - it.cy) / it.h));
+                    this.penSize = Math.round(2 + ratio * 28);
+                    break;
+                }
+                continue;
+            }
+            if (Math.hypot(fx - it.cx, fy - it.cy) < hr) { found = i; break; }
+        }
+
+        if (found >= 0) {
+            if (found === this.tbHovered) {
+                this.tbHoverTime++;
+                const it = items[found];
+                if (this.tbHoverTime > 16 && it.id !== 'size') {
+                    this._selectTBItem(it);
+                    this.tbHoverTime = 0;
+                }
+            } else {
+                this.tbHovered = found;
+                this.tbHoverTime = 0;
+            }
+        } else {
+            this.tbHovered = -1;
+            this.tbHoverTime = 0;
+        }
+    }
+
+    _selectTBItem(it) {
+        if (it.id === 'collapse') { this.tbExpanded = false; this.tbCooldown = 40; this.tbHovered = -1; }
+        else if (it.id === 'expand') { this.tbExpanded = true; this.tbCooldown = 40; this.tbHovered = -1; }
+        else if (it.id === 'pen') { this.tool = 'pen'; this.tbHoverTime = 0; }
+        else if (it.id === 'eraser') { this.tool = 'eraser'; this.tbHoverTime = 0; }
+        else if (it.id.startsWith('color_')) {
+            const i = parseInt(it.id.split('_')[1]);
+            this.penColor = this.PEN_COLORS[i]; this.tool = 'pen'; this.tbHoverTime = 0;
+        }
+    }
+
+    // ── 检测手指附近的笔画（移动用）───────────
+    _strokeNear(fx, fy, threshold) {
+        if (this.strokes.length === 0) return null;
+        // 先整体包围盒
+        let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+        for (const s of this.strokes) {
+            for (const p of s.points) {
+                if (p.x<minX) minX=p.x; if (p.x>maxX) maxX=p.x;
+                if (p.y<minY) minY=p.y; if (p.y>maxY) maxY=p.y;
+            }
+        }
+        if (fx < minX-threshold || fx > maxX+threshold || fy < minY-threshold || fy > maxY+threshold) return null;
+        // 精细检测
+        for (const s of this.strokes) {
+            for (const p of s.points) {
+                if (Math.hypot(p.x-fx, p.y-fy) < threshold) return s;
+            }
+        }
+        return null;
+    }
+
+    // ── 主循环 ────────────────────────────────
+    update(multiHandLandmarks, videoElement) {
+        const ctx = this.ctx;
+        const W = this.canvas.width, H = this.canvas.height;
+
+        ctx.drawImage(videoElement, 0, 0, W, H);
+        ctx.fillStyle = 'rgba(0,0,0,0.08)';
+        ctx.fillRect(0, 0, W, H);
+
+        const hands = multiHandLandmarks || [];
+        let anyPinching = false;
+
+        // ── 三指消散 ──────────────────────────
+        if (hands.some(h => isThreeOpen(h)) && this.strokes.length > 0) {
+            this._startDissolve(); this.moveStroke = null; this.moveFinger = null; this.writeLockUntil = 0;
+        }
+
+        // ── 双食指缩放 ────────────────────────
+        if (hands.length >= 2 && hands.every(h => isIndexOnly(h)) && !hands.some(h => isThumbIndexPinch(h, W, H))) {
+            const t1 = { x: hands[0][8].x*W, y: hands[0][8].y*H };
+            const t2 = { x: hands[1][8].x*W, y: hands[1][8].y*H };
+            const dist = Math.hypot(t1.x-t2.x, t1.y-t2.y);
+            if (!this.isScaling) { this.isScaling=true; this.scaleStartDist=dist; }
+            else {
+                const delta = dist / this.scaleStartDist;
+                if (Math.abs(delta-1) > 0.005) {
+                    const cx=W/2, cy=H/2;
+                    for (const s of this.strokes)
+                        for (const p of s.points) { p.x=cx+(p.x-cx)*delta; p.y=cy+(p.y-cy)*delta; }
+                    this.scaleStartDist = dist;
+                }
+            }
+            this._drawStrokes(ctx); this._drawToolbar(ctx); this._updateParticles(ctx);
+            return;
+        } else {
+            if (this.isScaling && hands.some(h => isThumbIndexPinch(h, W, H))) {
+                this.writeLockUntil = Date.now() + 3000;
+            }
+            this.isScaling = false;
+        }
+
+        // ── 收集所有食指位置 ──────────────────
+        const indexTips = hands.map(h => ({ x:h[8].x*W, y:h[8].y*H }));
+
+        // ── 工具栏悬停检测 ────────────────────
+        if (indexTips.length > 0) {
+            // 用离工具栏最近的食指
+            let best = null, bestD = Infinity;
+            for (const tip of indexTips) {
+                const d = Math.hypot(tip.x - this.TB_CX, tip.y - (this.TB_START + 80));
+                if (d < bestD) { bestD = d; best = tip; }
+            }
+            if (best) this._checkTBHover(best.x, best.y);
+        } else { this.tbHovered = -1; this.tbHoverTime = 0; }
+
+        // ── 移动笔画 ──────────────────────────
+        if (this.moveStroke) {
+            // 继续移动
+            if (indexTips.length > 0) {
+                const tip = indexTips[0];
+                if (this.moveFinger) {
+                    const dx = tip.x - this.moveFinger.x;
+                    const dy = tip.y - this.moveFinger.y;
+                    if (Math.abs(dx)>0.3 || Math.abs(dy)>0.3) {
+                        for (const s of this.strokes)
+                            for (const p of s.points) { p.x += dx; p.y += dy; }
+                        this.moveFinger = tip;
+                    }
+                } else { this.moveFinger = tip; }
+            }
+            // 检测松开：手指离开或捏合
+            const anyPinch = hands.some(h => isThumbIndexPinch(h, W, H));
+            if (indexTips.length===0 || anyPinch) {
+                this.moveStroke = null; this.moveFinger = null; this.moveHoverStart = 0;
+                if (anyPinch) this.writeLockUntil = Date.now() + 2000;
+            }
+            this._drawStrokes(ctx, true); this._drawToolbar(ctx); this._updateParticles(ctx);
+            return;
+        }
+
+        // ── 检测手指是否悬停在笔画上方（移动候选）─
+        if (indexTips.length === 1 && !hands.some(h => isThumbIndexPinch(h, W, H))) {
+            const tip = indexTips[0];
+            const near = this._strokeNear(tip.x, tip.y, 40);
+            if (near) {
+                if (!this.moveHoverStart) this.moveHoverStart = Date.now();
+                else if (Date.now() - this.moveHoverStart > 1500) {
+                    this.moveStroke = near; this.moveFinger = tip;
+                    this.moveHoverStart = 0; this.currentStroke = null;
+                }
+            } else { this.moveHoverStart = 0; }
+        } else { this.moveHoverStart = 0; }
+
+        // ── 捏合写字 / 橡皮擦 ──────────────────
+        const inCooldown = this.writeLockUntil && Date.now() < this.writeLockUntil;
+        if (!inCooldown) {
+        hands.forEach(hand => {
+            if (isThumbIndexPinch(hand, W, H)) {
+                anyPinching = true;
+                const px = hand[8].x*W, py = hand[8].y*H;
+                if (this.tool === 'eraser') {
+                    this._eraseAt(px, py);
+                    this.currentStroke = null;
+                } else {
+                    if (!this.currentStroke) this.currentStroke = { points:[], color:this.penColor, size:this.penSize };
+                    this.currentStroke.points.push({ x:px, y:py });
+                }
+            }
+        });
+
+        if (!anyPinching && this.currentStroke) {
+            if (this.currentStroke.points.length>0) this.strokes.push(this.currentStroke);
+            this.currentStroke = null;
+        }
+        } // inCooldown 结束
+
+        // ── 绘制 ─────────────────────────────────
+        this._drawStrokes(ctx, !!this.moveStroke && this.moveHoverStart > 0 && Date.now() - this.moveHoverStart > 800);
+        if (this.currentStroke && this.currentStroke.points.length>0) this._drawCurrentStroke(ctx);
+        this._drawToolbar(ctx);
+        this._updateParticles(ctx);
+    }
+
+    // ── 绘制笔画 ──────────────────────────────
+    _drawStrokes(ctx, highlight) {
+        for (const s of this.strokes) {
+            if (s.points.length < 2) continue;
+            ctx.beginPath();
+            ctx.strokeStyle = s.color;
+            ctx.lineWidth = s.size;
+            ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+            // 移动模式高亮
+            if (highlight && s === this.moveStroke) {
+                ctx.shadowColor = 'rgba(255,215,0,0.7)'; ctx.shadowBlur = 18;
+                ctx.lineWidth = s.size + 2;
+            }
+            ctx.moveTo(s.points[0].x, s.points[0].y);
+            for (let i=1; i<s.points.length; i++) {
+                const mx = (s.points[i-1].x+s.points[i].x)/2;
+                const my = (s.points[i-1].y+s.points[i].y)/2;
+                ctx.quadraticCurveTo(s.points[i-1].x, s.points[i-1].y, mx, my);
+            }
+            ctx.stroke();
+            if (highlight && s===this.moveStroke) { ctx.shadowBlur=0; ctx.shadowColor='transparent'; }
+        }
+    }
+
+    _drawCurrentStroke(ctx) {
+        const s = this.currentStroke;
+        if (s.points.length < 2) return;
+        ctx.beginPath();
+        ctx.strokeStyle = s.color; ctx.lineWidth = s.size;
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.moveTo(s.points[0].x, s.points[0].y);
+        for (let i=1; i<s.points.length; i++) {
+            const mx=(s.points[i-1].x+s.points[i].x)/2;
+            const my=(s.points[i-1].y+s.points[i].y)/2;
+            ctx.quadraticCurveTo(s.points[i-1].x, s.points[i-1].y, mx, my);
+        }
+        ctx.stroke();
+    }
+
+    _eraseAt(x, y) {
+        const r = this.penSize*4;
+        for (const s of this.strokes) s.points = s.points.filter(p => Math.hypot(p.x-x, p.y-y) > r);
+        this.strokes = this.strokes.filter(s => s.points.length >= 2);
+    }
+
+    // ── 消散 ──────────────────────────────────
+    _startDissolve() {
+        const maxP = 600;
+        const allPts = [];
+        for (const s of this.strokes)
+            for (const p of s.points) allPts.push({ x:p.x, y:p.y, color:s.color, size:s.size });
+        const sample = [];
+        const step = Math.max(1, Math.floor(allPts.length/maxP));
+        for (let i=0; i<allPts.length; i+=step) sample.push(allPts[i]);
+        const src = sample.length>0 ? sample : allPts;
+        for (const p of src) {
+            this.particles.push({
+                x:p.x, y:p.y,
+                vx:(Math.random()-0.5)*2.5, vy:Math.random()*1.5+0.3,
+                life:1.0, decay:0.003+Math.random()*0.008,
+                color:p.color, size:(p.size||3)*(0.5+Math.random())
+            });
+        }
+        this.strokes = []; this.currentStroke = null;
+    }
+
+    _updateParticles(ctx) {
+        for (let i=this.particles.length-1; i>=0; i--) {
+            const p = this.particles[i];
+            p.x+=p.vx; p.y+=p.vy;
+            p.vy+=0.04; p.vx+=Math.sin(p.y*0.02+i)*0.03;
+            p.life-=p.decay;
+            if (p.life<=0) { this.particles.splice(i,1); continue; }
+            ctx.globalAlpha = p.life;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, Math.max(p.size*p.life,0.5), 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
+}
+
+
+// ─────────────────────────────────────────────
+// MainController
+// ─────────────────────────────────────────────
+class MainController {
+    constructor(canvas, ctx, video) {
+        this.canvas = canvas;
+        this.ctx = ctx;
+        this.video = video;
+        this.modes = [];
+        this.currentIndex = 0;
+        this.hoveredIdx = -1;
+        this.hoverStartTime = 0;
+        this.HOVER_MS = 800;
+        this.ROW_H = 40;
+        this.ZONE = { x: 12, y: 12, w: 162, h: 176 };
+    }
+
+    register(m) {
+        this.modes.push(m);
+        return this;
+    }
+
+    start() {
+        this.modes[this.currentIndex].init();
+    }
+
+    onFrame(landmarks) {
+        if (!this.modes.length) return;
+        this._checkSwitch(landmarks);
+        this.modes[this.currentIndex].update(landmarks, this.video);
+    }
+
+    drawHUD() {
+        const names = ['粒子特效', '取景器', '3D 牵引', '隔空手写'];
+        const modeLabels = ['Mode 1：粒子特效', 'Mode 2：取景器', 'Mode 3：3D 牵引', 'Mode 4：隔空手写'];
+        const ctx = this.ctx;
+        const Z = this.ZONE;
+        const RY = Z.y + 12;
+
+        ctx.save();
+        ctx.textBaseline = 'top';
+
+        // 面板背景（轻量毛玻璃）
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.roundRect(Z.x, Z.y, Z.w, Z.h, 12); ctx.fill(); ctx.stroke();
+
+        // 标题
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.font = '10px Arial';
+        ctx.textAlign = 'left';
+        ctx.fillText('切换模式 ▸ 指一下', Z.x + 12, Z.y + 5);
+
+        for (let i = 0; i < 4; i++) {
+            const ry = RY + i * this.ROW_H;
+            const active = i === this.currentIndex;
+            const hovering = this.hoveredIdx === i;
+            const cx = Z.x + 24, cy = ry + 18;
+
+            // 悬停进度背景
+            if (hovering) {
+                const elapsed = Date.now() - this.hoverStartTime;
+                const p = Math.min(elapsed / this.HOVER_MS, 1);
+                ctx.fillStyle = 'rgba(255,215,0,0.2)';
+                ctx.beginPath(); ctx.roundRect(Z.x + 8, ry, Z.w - 16, this.ROW_H - 2, 7); ctx.fill();
+                ctx.fillStyle = 'rgba(255,215,0,0.35)';
+                ctx.beginPath(); ctx.roundRect(Z.x + 8, ry, (Z.w - 16) * p, this.ROW_H - 2, 7); ctx.fill();
+            }
+
+            // 序号圆圈
+            ctx.beginPath();
+            ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+            if (hovering) {
+                ctx.fillStyle = 'rgba(255,215,0,0.7)';
+                ctx.strokeStyle = 'rgba(255,215,0,1)';
+                ctx.lineWidth = 3;
+            } else if (active) {
+                ctx.fillStyle = 'rgba(255,215,0,0.85)';
+                ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+                ctx.lineWidth = 2.5;
+            } else {
+                ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+                ctx.lineWidth = 2;
+            }
+            ctx.fill();
+            ctx.stroke();
+
+            // 数字
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 12px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(i + 1, cx, cy - 5);
+
+            // 名称
+            ctx.fillStyle = active ? 'rgba(255,215,0,0.95)' : (hovering ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.5)');
+            ctx.font = '14px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(names[i], Z.x + 48, cy - 6);
+        }
+        ctx.restore();
+
+        // 底部
+        ctx.save();
+        ctx.font = 'bold 20px Arial';
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.textAlign = 'left';
+        ctx.fillText(modeLabels[this.currentIndex], 24, 696);
+        ctx.restore();
+    }
+
+    _checkSwitch(landmarks) {
+        if (!landmarks || landmarks.length === 0) {
+            this.hoveredIdx = -1;
+            return;
+        }
+
+        const W = this.canvas.width, H = this.canvas.height;
+        const Z = this.ZONE;
+        const RY = Z.y + 12;
+
+        // 找任意食指指尖是否在某个模式行上（HUD 用非镜像坐标，所以指尖也要用视觉坐标）
+        let found = -1;
+        for (const hand of landmarks) {
+            const fx = W - hand[8].x * W, fy = hand[8].y * H;
+            for (let i = 0; i < 4; i++) {
+                const ry = RY + i * this.ROW_H;
+                if (fx >= Z.x && fx <= Z.x + Z.w && fy >= ry && fy <= ry + this.ROW_H) {
+                    found = i; break;
+                }
+            }
+            if (found >= 0) break;
+        }
+
+        if (found >= 0) {
+            if (found === this.hoveredIdx) {
+                if (Date.now() - this.hoverStartTime > this.HOVER_MS) {
+                    if (found !== this.currentIndex) {
+                        this.modes[this.currentIndex].destroy();
+                        this.currentIndex = found;
+                        this.modes[this.currentIndex].init();
+                    }
+                    this.hoveredIdx = -1;
+                }
+            } else {
+                this.hoveredIdx = found;
+                this.hoverStartTime = Date.now();
+            }
+        } else {
+            this.hoveredIdx = -1;
+        }
+    }
+}
+
+
+// ─────────────────────────────────────────────
+// 组装
+// ─────────────────────────────────────────────
+const controller = new MainController(canvasElement, canvasCtx, videoElement);
+
+controller
+    .register(new ParticleMode(canvasElement, canvasCtx))
+    .register(new ViewfinderMode(canvasElement, canvasCtx))
+    .register(new TetherMode(canvasElement, canvasCtx))
+    .register(new DrawingMode(canvasElement, canvasCtx))
+    .start();
+
+
+// ─────────────────────────────────────────────
+// MediaPipe
+// ─────────────────────────────────────────────
+const hands = new Hands({
+    locateFile: f => `models/${f}`
+});
+
+hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.5
+});
+
+hands.onResults(results => {
+    canvasCtx.save();
+    canvasCtx.translate(canvasElement.width, 0);
+    canvasCtx.scale(-1, 1);
+    controller.onFrame(results.multiHandLandmarks);
+    canvasCtx.restore();
+    controller.drawHUD();
+});
+
+const camera = new Camera(videoElement, {
+    onFrame: async () => {
+        await hands.send({ image: videoElement });
+    },
+    width: 1280,
+    height: 720
+});
+
+camera.start();
+</script>
+</body>
+</html>
